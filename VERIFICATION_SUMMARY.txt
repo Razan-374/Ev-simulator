@@ -1,0 +1,139 @@
+================================================================================
+STAGE 1 MODEL VERIFICATION - QUICK REFERENCE
+================================================================================
+
+1. EV POPULATION
+   Q: Does N include all modeled EVs or only controllable EVs?
+   A: ✅ N = controllable V1G EVs only (not unmanaged V0G)
+   
+2. EXISTING INFRASTRUCTURE  
+   Q: Difference between 22 physical and 17 assumed controllable outlets?
+   A: ⚠️ 17 internal (V1G) + 4 external (V0G) + 1 reserved/unspecified
+      → Needs documentation why 5 outlets reserved
+   
+3. PEAK REDUCTION
+   Q: Reported for fixed N or selected across sweep?
+   A: ✅ Calculated separately for EACH N in sweep (0,5,10,...,100)
+      → Peak reduction = Baseline_peak - Optimized_peak
+   
+4. RANDOM SAMPLING
+   Q: Complete empirical triplets sampled jointly?
+   A: ⚠️ Triplets are empirical (arrival, dwell, energy) but:
+      → N-sweep uses DETERMINISTIC subsets (first N of fixed sample)
+      → Not random per N, loses fleet correlation
+   
+5. DAY CATEGORIES
+   Q: How weekday/Friday/weekend sessions selected?
+   A: ✅ Day type determines:
+      → Blocked outlet distribution (empirical k_dist_by_type)
+      → EV population pool (day-stratified triplets)
+      → Base hospital load profile selection
+   
+6. BLOCKING DYNAMICS
+   Q: How blocked outlets affect availability over time?
+   A: ⚠️ Constant all-day (sampled once at midnight, applied to all 96 slots)
+      → No intra-day blocking changes
+      → Availability = 17 - k_blocked (same every slot)
+   
+7. INITIAL SoC
+   Q: Measured, inferred, or assumed?
+   A: ✅ INFERRED from energy requirement:
+      → SoC_arrival = 1.0 - (E_required / 75 kWh)
+      → Formula verified and implemented correctly
+      ⚠️ BUT: No minimum SoC floor → allows discharge to 0%
+   
+8. ENERGY BALANCE
+   Q: Discharge energy, efficiencies, departure requirements correct?
+   A: ⚠️ ASYMMETRIC EFFICIENCY ISSUE:
+      ✅ Charging: 90% efficiency correctly applied
+      ❌ Discharge: Treated as 100% efficient (should be ~95%)
+      ✅ Departure: Energy requirement properly enforced
+      ✅ Charger availability: Per-slot constraints work
+      → IMPACTS: 5-10% overestimation of V2G benefits
+   
+9. SIMULATION OUTPUTS
+   Q: Every 15-minute optimized profile saved?
+   A: ❌ CRITICAL GAP: Only aggregated metrics saved
+      ✅ Saved: N, baseline_peak, optimized_peak, site_peak_reduction_kw, etc.
+      ❌ NOT saved: chargeprofiles[i,t], total_load[t] timeseries per scenario
+      → Cannot reconstruct slot-level behavior or validate patterns
+   
+10. SoC ASYMMETRIC EFFICIENCY (Technical Issue)
+    Q: SoC update uses asymmetric efficiency for charge/discharge?
+    A: ⚠️ NO - INCORRECTLY SYMMETRIC:
+       Current: SoC_t+1 = SoC_t ± chargeprofiles[i,t] × 0.9 × Δt
+       Correct: SoC_t+1 = SoC_t + (charge × 0.9 - discharge / 0.95) × Δt
+       Impact: Discharge capacity overstated by ~5%, unrealistic SoC trajectories
+       
+================================================================================
+CRITICAL ISSUES (BLOCKING FIX BEFORE VALIDATION)
+================================================================================
+
+[CRITICAL] Issue #1: Load Profile Export Missing
+  - No slot-level timeseries saved for validation/reproducibility
+  - Fix: Implement HDF5/NetCDF export of chargeprofiles[i,t], total_load[t]
+  
+[CRITICAL] Issue #2: Discharge Efficiency Not Modeled
+  - Asymmetric efficiency not implemented (charge 90%, discharge 100% assumed)
+  - Fix: Add discharge_efficiency=0.95, use conditional SoC updates
+  
+[IMPORTANT] Issue #3: No SoC Floor Constraint
+  - EVs can discharge to 0% SoC (unrealistic for real battery)
+  - Fix: Add constraint SoC[i,t] >= 0.20
+  
+[IMPORTANT] Issue #4: Infrastructure Mapping Unclear
+  - Why exactly 22→17 outlets? 5 reserved for what?
+  - Fix: Add explicit documentation
+
+================================================================================
+RECOMMENDED SEPTEMBER 2026 UPDATES
+================================================================================
+
+BEFORE RUNNING NEW EXPERIMENTS:
+
+1. Export slot-level profiles
+   [ ] Create HDF5 file per seed: profiles_seed_0.h5, ..., profiles_seed_9.h5
+   [ ] Store: chargeprofiles[i,t], dischargeprofiles[i,t], total_load[t]
+   [ ] Enables: Reproducibility, slot-level validation, pattern analysis
+   
+2. Correct asymmetric efficiency
+   [ ] Add: discharge_efficiency = 0.95 parameter
+   [ ] Modify: SoC update to use charge_efficiency for positive power
+   [ ] Modify: SoC update to use 1/discharge_efficiency for negative power
+   [ ] Re-validate: All results after efficiency correction
+   
+3. Add SoC bounds
+   [ ] Add: SoC[i,t] >= 0.20 constraint (20% minimum floor)
+   [ ] Rationale: Real batteries shouldn't discharge below ~20% for longevity
+   [ ] Impact: Reduces unrealistic discharge, improves realism
+   
+4. Document infrastructure
+   [ ] Clarify: 22 total outlets = 17 controllable + 4 external + 1 reserved?
+   [ ] Specify: Why 5 outlets removed (maintenance? legacy? capacity limit?)
+   [ ] Update: Code comments and README
+
+VALIDATION CHECKLIST:
+   [ ] All 10 seeds run without solver errors
+   [ ] Peak reduction monotonic increase with N (expected behavior)
+   [ ] V2G discharge only when optimizing for peak objective
+   [ ] SoC stays in range [0.20, 1.00] throughout (with floor constraint)
+   [ ] Slot profiles export successfully and are reproducible
+   [ ] Results match paper expectations (within 5% tolerance)
+   [ ] Commit all changes with clear commit messages
+
+================================================================================
+KEY CODE REFERENCES
+================================================================================
+
+EV Population:        Line ~2150: n_V1G_Veh = int(n_internal)
+Infrastructure:       Line ~1950: internal_chargers_available = 17
+Peak Calculation:     Line ~1850: site_peak_reduction_kw = baseline_peak - optimized_peak
+Triplet Sampling:     Line ~290: internal_triplets_by_cluster_and_daytype
+Day Categories:       Line ~115: k_dist_by_type dictionary
+Blocking Model:       Line ~945: k_blocked = sample_k_blocked(day_start)
+Initial SoC:          Line ~700: startingSOC = 1.0 - (energy_required / battery_cap)
+Energy Balance:       Line ~965: delivered_energy = chargeprofiles[i,t] × 0.9 × SLOT_HOURS
+SoC Update:           Line ~930: model += temp_startSOC + lp.lpSum(...) <= 1.0
+Output Export:        Line ~1900: df_res.to_csv(out_path) → ONLY aggregates, no profiles
+
+================================================================================
